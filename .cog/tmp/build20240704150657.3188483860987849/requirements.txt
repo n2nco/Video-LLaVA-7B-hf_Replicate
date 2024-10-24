@@ -1,0 +1,11 @@
+torch>=2.0.0
+torchvision
+torchaudio
+transformers==4.42.3
+huggingface-hub==0.23.4
+av==12.2.0
+accelerate==0.31.0
+pillow==10.4.0
+sentencepiece==0.2.0
+protobuf==5.27.2
+numpy==1.26.4
