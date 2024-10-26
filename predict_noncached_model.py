@@ -7,7 +7,6 @@ import time
 from typing import Union
 from cog import BasePredictor, Input, Path
 from transformers import VideoLlavaProcessor, VideoLlavaForConditionalGeneration
-from PIL import Image
 
 def print_log(*args, **kwargs):
     print(*args, **kwargs, flush=True)
@@ -29,92 +28,58 @@ class Predictor:
       start_time = time.time()
       print_log("Starting model setup...")
 
-      os.environ["TRANSFORMERS_CACHE"] = "/src/model_cache"
-
       self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-      print_log(f"Using device: {self.device}")
-
-      # Print configuration details
-      print_log("\nModel Configuration:")
-      print_log(f"• Device: {self.device.type}")
-      # print_log(f"• Dtype: {torch.bfloat16 if self.device.type == 'cuda' else torch.float32}")
-      # print_log(f"• Device Map: {'auto' if self.device.type == 'cuda' else 'None'}")
-      # print_log(f"• Quantization: {'8-bit' if self.device.type == 'cuda' else 'None'}")
-      print_log(f"• Cache Dir: {os.environ['TRANSFORMERS_CACHE']}")
-      # print_log(f"• Offload Folder: /tmp/offload")
-      print_log("--------------------\n")
 
       model_id = "LanguageBind/Video-LLaVA-7B-hf"
       
       try:
-          # Load model with minimal settings and BF16 for faster loading
+          # Fastest possible loading configuration
           self.model = VideoLlavaForConditionalGeneration.from_pretrained(
               model_id,
               torch_dtype=torch.bfloat16 if self.device.type == "cuda" else torch.float32,
               device_map="auto" if self.device.type == "cuda" else None,
-              # load_in_8bit=True if self.device.type == "cuda" else False,  # 8-bit loading is faster than 4-bit
-              # low_cpu_mem_usage=True,
-              trust_remote_code=True,
-              use_safetensors=True
-              # offload_folder="/tmp/offload",  # Enable disk offloading for faster boot?
-              # local_files_only=True 
+              use_safetensors=True,
+              # Removed low_cpu_mem_usage as it can slow initial loading
+              trust_remote_code=True
           )
           
           if self.device.type != "cuda":
               self.model = self.model.to(self.device)
 
           if self.device.type == "cuda":
-            print('setting memory fraction to 0.95')
-            # torch.cuda.empty_cache()
-            torch.cuda.set_per_process_memory_fraction(0.95)
+              torch.cuda.set_per_process_memory_fraction(0.95)
 
-          # Load processor
+          # Load processor (this is relatively fast)
           self.processor = VideoLlavaProcessor.from_pretrained(model_id)
           
           self.model.eval()
-          torch.cuda.empty_cache()  # Clear any GPU memory
-          print_log(f"Model loaded in {time.time() - start_time:.2f}s")
+          torch.cuda.empty_cache()
 
       except Exception as e:
           print_log(f"Error during setup: {str(e)}")
           raise RuntimeError(f"Model setup failed: {str(e)}") from e
+
     def predict(
         self,
         video: Path = Input(description="Input video file - upload a file or provide a URL (remote or bytes) via API"),
         prompt: str = "What is happening in this video?",
-        num_frames: int = 10,  # This is our passed-in frame count
+        num_frames: int = 10,
         max_new_tokens: int = 500,
         temperature: float = 0.1,
         top_p: float = 0.9
     ) -> str:
       try:
         predict_start = time.time()
-        print_log(f"Starting prediction at {time.strftime('%H:%M:%S')}")
+        container = av.open(str(video))
 
-        print("Prompt:", prompt)
-
-        container = av.open(str(video))  # video is already a string now, but str() ensures safety
-
-
-        # Get the total number of frames in the video
-        # Try to get the total number of frames; if it's zero, count frames manually
         total_frames = container.streams.video[0].frames
         if total_frames == 0:
-            total_frames = sum(1 for _ in container.decode(video=0))  # Count manually
-            container.seek(0)  # Reset after counting
+            total_frames = sum(1 for _ in container.decode(video=0))
+            container.seek(0)
 
-
-        # Adjust frames_to_use based on available frames in the video
         frames_to_use = min(total_frames, num_frames) if total_frames > 0 else num_frames
-        print_log(f"Using {frames_to_use} frames")
-
-        # Simple index calculation, ensuring we do not exceed the available frames
         indices = np.linspace(0, total_frames - 1, frames_to_use, dtype=int)
-        print_log(f"Using indices: {indices}")
-
-        # Read the frames from the video
         clip = read_video_pyav(container, indices)
-        print_log(f"Extracted {len(clip)} frames")
 
         full_prompt = f"USER: <video>{prompt} ASSISTANT:"
         inputs = self.processor(
@@ -123,7 +88,6 @@ class Predictor:
             return_tensors="pt"
         )
 
-        # Move to device
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
         with torch.inference_mode():
@@ -141,10 +105,7 @@ class Predictor:
             clean_up_tokenization_spaces=False
         )[0]
 
-        print_log(f"Total prediction time: {time.time() - predict_start:.2f}s")
-        result = result.split("ASSISTANT:")[-1].strip()
-        # print(result)
-        return result
+        return result.split("ASSISTANT:")[-1].strip()
 
       except Exception as e:
           print_log(f"Error during prediction: {str(e)}")
@@ -158,10 +119,9 @@ if __name__ == "__main__":
     predictor = Predictor()
     predictor.setup()
     
-    # Warm up run (optional but can help stabilize performance)
     try:
         result = predictor.predict(
-            video=video_path,  # Changed from video_path=video_path
+            video=video_path,
             prompt="What is happening in this video?",
             temperature=0.7,
             top_p=0.9,
